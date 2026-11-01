@@ -289,6 +289,8 @@ def main():
                     help="dump all configuration (zones, areas, doors, devices, users)")
     ap.add_argument("--json", action="store_true",
                     help="output in JSON format")
+    ap.add_argument("--area-config", action="store_true",
+                    help="read raw area configuration (includes exit/entry delays)")
     ap.add_argument("--timeout", type=float, default=12.0)
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="verbose output with connection steps and raw data (for debugging/LLM)")
@@ -677,6 +679,48 @@ def main():
                                 print(f"  #{d['num']:3d}  {d['name']}")
                         else:
                             print("Devices: (none found)")
+                    break
+
+        # [14] optional raw area configuration read
+        if args.area_config:
+            # 25 03 32 <start> <count> - raw area records with timers/config
+            q = proto.build(0x60, 50, tx_payload(session, bytes([
+                0x25, 0x03, 0x32, 0x01, 0x50  # start=1, count=80
+            ])))
+            if VERBOSE:
+                print("[14] fetch raw area configuration ...")
+            ws.send(proto.wrap_ws(q))
+            deadline = time.time() + args.timeout
+            while time.time() < deadline:
+                kind, data = recv_frame(ws, args.timeout)
+                if kind != "panel":
+                    continue
+                p = proto.parse(data)
+                if p["seq"] == 50 and p["crc_ok"]:
+                    pl = p["payload"]
+                    if VERBOSE:
+                        print(f"Area config raw ({len(pl)} bytes): {pl.hex(' ')}")
+                    # Parse area records - header is 4 bytes (7d 38 32 1b)
+                    # Each area is ~27 bytes based on capture
+                    # Fields: areano, textword, exittime, entrytime, events...
+                    data = pl[4:] if len(pl) > 4 else pl
+                    # Area 1 data starts at offset 0
+                    # Looking at DLL: areano(1), textword(2), exittime(2), entrytime(2)
+                    if len(data) >= 27:
+                        area1 = data[0:27]
+                        area_no = area1[0]
+                        # exittime appears to be at offset ~25-26 based on capture pattern
+                        # The 26 4e bytes suggest exit=38 (0x26) entry=78 (0x4e) seconds
+                        exit_time = area1[25] if len(area1) > 25 else 0
+                        entry_time = area1[26] if len(area1) > 26 else 0
+                        print(f"Area {area_no}: exit_time={exit_time}s, entry_time={entry_time}s")
+                        print(f"  (raw bytes for analysis: {area1.hex(' ')})")
+                    if len(data) >= 54:
+                        area2 = data[27:54]
+                        area_no = area2[0] if area2[0] != 0 else 2
+                        exit_time = area2[25] if len(area2) > 25 else 0
+                        entry_time = area2[26] if len(area2) > 26 else 0
+                        print(f"Area {area_no}: exit_time={exit_time}s, entry_time={entry_time}s")
                     break
 
         # Output JSON if requested
