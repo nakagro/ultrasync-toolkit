@@ -23,7 +23,7 @@ Config (.env, same dir by default, or pass --env PATH):
 
 Requires: pip install websocket-client
 """
-import argparse, os, struct, sys, time
+import argparse, json, os, struct, sys, time
 from datetime import datetime
 from pathlib import Path
 
@@ -277,6 +277,8 @@ def main():
                     help="read device names (keypads, card readers)")
     ap.add_argument("--dump-all", action="store_true",
                     help="dump all configuration (zones, areas, doors, devices, users)")
+    ap.add_argument("--json", action="store_true",
+                    help="output in JSON format")
     ap.add_argument("--timeout", type=float, default=12.0)
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="verbose output with connection steps and raw data (for debugging/LLM)")
@@ -389,6 +391,9 @@ def main():
             print("No valid login reply received.")
             return
 
+        # Collect results for JSON output
+        results = {}
+
         # [6] optional read-only identity query
         if args.info:
             q = proto.build(0x60, 1, tx_payload(session, bytes([0x25, 0x02, 0x37, 0x01])))
@@ -451,15 +456,17 @@ def main():
                     if VERBOSE:
                         print(f"    raw ({len(pl)} bytes): {pl.hex(' ')}")
                     events = decode_events(pl)
-                    if VERBOSE:
-                        print(f"    Event history ({len(events)} events):")
-                    if events:
-                        print("Events:")
-                        for ev in events:
-                            user_str = f"  user {ev['user']}" if ev['user'] else ""
-                            print(f"  {ev['time']}  {ev['code']:12}{user_str}")
-                    else:
-                        print("Events: (none found)")
+                    results["events"] = events
+                    if not args.json:
+                        if VERBOSE:
+                            print(f"    Event history ({len(events)} events):")
+                        if events:
+                            print("Events:")
+                            for ev in events:
+                                user_str = f"  user {ev['user']}" if ev['user'] else ""
+                                print(f"  {ev['time']}  {ev['code']:12}{user_str}")
+                        else:
+                            print("Events: (none found)")
                     break
 
         # [9] optional user record read (paginated - panel returns 2 users per response)
@@ -516,16 +523,18 @@ def main():
                 if seq > 250:  # safety limit
                     break
 
-            # Filter to requested range and print
+            # Filter to requested range
             all_users = [u for u in all_users if start <= u["num"] <= end]
-            if VERBOSE:
-                print(f"    Users ({len(all_users)} found):")
-            if all_users:
-                print("Users:")
-                for u in all_users:
-                    print(f"  #{u['num']:3d}  {u['name']}")
-            else:
-                print("Users: (none found)")
+            results["users"] = all_users
+            if not args.json:
+                if VERBOSE:
+                    print(f"    Users ({len(all_users)} found):")
+                if all_users:
+                    print("Users:")
+                    for u in all_users:
+                        print(f"  #{u['num']:3d}  {u['name']}")
+                else:
+                    print("Users: (none found)")
 
         # [10] optional zone names read
         if args.zones or args.dump_all:
@@ -559,12 +568,14 @@ def main():
                 if not got_any:
                     break
                 seq += 1
-            if all_names:
-                print("Zones:")
-                for z in all_names:
-                    print(f"  #{z['num']:3d}  {z['name']}")
-            else:
-                print("Zones: (none found)")
+            results["zones"] = all_names
+            if not args.json:
+                if all_names:
+                    print("Zones:")
+                    for z in all_names:
+                        print(f"  #{z['num']:3d}  {z['name']}")
+                else:
+                    print("Zones: (none found)")
 
         # [11] optional area/user-category names read (type 0x34)
         if args.areas or args.dump_all:
@@ -597,12 +608,14 @@ def main():
                 if not got_any:
                     break
                 seq += 1
-            if all_names:
-                print("Areas/Categories:")
-                for a in all_names:
-                    print(f"  #{a['num']:3d}  {a['name']}")
-            else:
-                print("Areas: (none found)")
+            results["areas"] = all_names
+            if not args.json:
+                if all_names:
+                    print("Areas/Categories:")
+                    for a in all_names:
+                        print(f"  #{a['num']:3d}  {a['name']}")
+                else:
+                    print("Areas: (none found)")
 
         # [12] optional door names read
         if args.doors or args.dump_all:
@@ -620,12 +633,14 @@ def main():
                 p = proto.parse(data)
                 if p["seq"] == 30 and p["crc_ok"]:
                     names = decode_names(p["payload"])
-                    if names:
-                        print("Doors:")
-                        for d in names:
-                            print(f"  #{d['num']:3d}  {d['name']}")
-                    else:
-                        print("Doors: (none found)")
+                    results["doors"] = names
+                    if not args.json:
+                        if names:
+                            print("Doors:")
+                            for d in names:
+                                print(f"  #{d['num']:3d}  {d['name']}")
+                        else:
+                            print("Doors: (none found)")
                     break
 
         # [13] optional device names read
@@ -644,13 +659,19 @@ def main():
                 p = proto.parse(data)
                 if p["seq"] == 40 and p["crc_ok"]:
                     names = decode_names(p["payload"])
-                    if names:
-                        print("Devices:")
-                        for d in names:
-                            print(f"  #{d['num']:3d}  {d['name']}")
-                    else:
-                        print("Devices: (none found)")
+                    results["devices"] = names
+                    if not args.json:
+                        if names:
+                            print("Devices:")
+                            for d in names:
+                                print(f"  #{d['num']:3d}  {d['name']}")
+                        else:
+                            print("Devices: (none found)")
                     break
+
+        # Output JSON if requested
+        if args.json and results:
+            print(json.dumps(results, indent=2))
     finally:
         ws.close()
         if VERBOSE:
