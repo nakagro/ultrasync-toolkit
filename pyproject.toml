@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ultrasync-toolkit"
+version = "0.1.0"
+description = "Python toolkit for Tecom ChallengerPlus alarm panels via UltraSync cloud"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.8"
+dependencies = [
+    "websocket-client>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]
+
+[project.scripts]
+ultrasync = "ultrasync_toolkit.connect_login:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ultrasync_toolkit"]
