@@ -24,10 +24,80 @@ Config (.env, same dir by default, or pass --env PATH):
 Requires: pip install websocket-client
 """
 import argparse, os, struct, sys, time
+from datetime import datetime
 from pathlib import Path
 
 from . import ultrasync_proto as proto
 from . import ultrasync_webauth as wa
+
+
+# ---------- record decoders ----------
+EVENT_CODES = {
+    0x0b: "ARM",
+    0x0c: "DISARM",
+    0x01: "ZONE ALARM",
+    0x02: "ZONE RESTORE",
+    0x05: "DOOR ACCESS",
+    0x06: "DOOR DENIED",
+}
+
+
+def decode_timestamp(b4: bytes) -> str:
+    """Decode 4-byte ChallengerPlus timestamp. Format TBD - showing raw for now."""
+    # Timestamps appear to be seconds since a panel-specific epoch
+    # Need more data points to determine exact epoch
+    val = struct.unpack("<I", b4)[0]
+    # Try epoch of 2000-01-01 (common in embedded systems)
+    try:
+        dt = datetime(2000, 1, 1) + __import__('datetime').timedelta(seconds=val)
+        if 2020 <= dt.year <= 2030:
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except:
+        pass
+    return f"raw:{b4.hex()}"
+
+
+def decode_events(payload: bytes) -> list:
+    """Parse event history response into list of event dicts."""
+    if len(payload) < 4:
+        return []
+    # Header: 4 bytes (7d 80 45 <count>), then 14-byte records
+    data = payload[4:]
+    events = []
+    # Each event is 14 bytes: 2-byte rec#, 4-byte timestamp, 1-byte code, 3-byte flags, 4-byte user/extra
+    for i in range(0, len(data), 14):
+        if i + 14 > len(data):
+            break
+        rec = data[i:i+14]
+        rec_num = struct.unpack("<H", rec[0:2])[0]
+        ts = decode_timestamp(rec[2:6])
+        code = rec[6]
+        code_name = EVENT_CODES.get(code, f"0x{code:02x}")
+        user = rec[10]  # User number at offset 10
+        events.append({"num": rec_num, "time": ts, "code": code_name, "user": user})
+    return events
+
+
+def decode_users(payload: bytes) -> list:
+    """Parse user record response into list of user dicts."""
+    if len(payload) < 6:
+        return []
+    # Header: 6 bytes, then 42-byte records
+    # 90 bytes = 6 header + 84 data = 2 users * 42 bytes
+    data = payload[6:]
+    users = []
+    rec_size = 42
+    for i in range(0, len(data), rec_size):
+        if i + rec_size > len(data):
+            break
+        rec = data[i:i+rec_size]
+        user_num = struct.unpack("<H", rec[0:2])[0]
+        # Name field is 26 bytes starting at offset 16, null-terminated
+        name_bytes = rec[16:42]
+        name = name_bytes.split(b'\x00')[0].decode('ascii', 'replace').strip()
+        if name:
+            users.append({"num": user_num, "name": name})
+    return users
 
 try:
     import websocket  # websocket-client
@@ -143,6 +213,12 @@ def main():
     ap.add_argument("--env", default=str(here / ".env"))
     ap.add_argument("--info", action="store_true",
                     help="after login, send the read-only identity query (25 02 37 01)")
+    ap.add_argument("--read-system", action="store_true",
+                    help="read System Options record (0x36) — contains arm state bits")
+    ap.add_argument("--history", action="store_true",
+                    help="read event history buffer (25 05 45)")
+    ap.add_argument("--users", action="store_true",
+                    help="read user records (0x1D)")
     ap.add_argument("--timeout", type=float, default=12.0)
     ap.add_argument("--debug", action="store_true", help="print raw frames (no credentials)")
     ap.add_argument("--replay-ctplus-login", action="store_true",
@@ -262,6 +338,64 @@ def main():
                     name = bytes(b for b in pl if 32 <= b < 127)
                     print(f"    identity reply ({len(pl)} bytes): {pl.hex(' ')}")
                     print(f"    printable: {name.decode('ascii', 'replace')}")
+                    break
+
+        # [7] optional System Options record read (0x36)
+        if args.read_system:
+            q = proto.build(0x60, 2, tx_payload(session, bytes([0x25, 0x01, 0x36, 0x01])))
+            print("[7] send System Options read 25 01 36 01 (seq=2) ...")
+            ws.send(proto.wrap_ws(q))
+            deadline = time.time() + args.timeout
+            while time.time() < deadline:
+                kind, data = recv_frame(ws, args.timeout)
+                if kind != "panel":
+                    continue
+                p = proto.parse(data)
+                if p["seq"] == 2 and p["crc_ok"]:
+                    pl = p["payload"]
+                    print(f"    System Options ({len(pl)} bytes): {pl.hex(' ')}")
+                    break
+
+        # [8] optional event history read
+        if args.history:
+            # 25 05 45 <start_lo> <start_hi> <count_lo> <count_hi>
+            # Start at record 1, read 50 events
+            q = proto.build(0x60, 3, tx_payload(session, bytes([0x25, 0x05, 0x45, 0x01, 0x00, 0x32, 0x00])))
+            print("[8] send event history read 25 05 45 (seq=3, up to 50 events) ...")
+            ws.send(proto.wrap_ws(q))
+            deadline = time.time() + args.timeout
+            while time.time() < deadline:
+                kind, data = recv_frame(ws, args.timeout)
+                if kind != "panel":
+                    continue
+                p = proto.parse(data)
+                if p["seq"] == 3 and p["crc_ok"]:
+                    pl = p["payload"]
+                    events = decode_events(pl)
+                    print(f"    Event history ({len(events)} events):")
+                    for ev in events:
+                        user_str = f"user {ev['user']}" if ev['user'] else ""
+                        print(f"      {ev['time']}  {ev['code']:12} {user_str}")
+                    break
+
+        # [9] optional user record read
+        if args.users:
+            # 25 05 1D <start_lo> <start_hi> <count_lo> <count_hi> - range read users 1-100
+            q = proto.build(0x60, 4, tx_payload(session, bytes([0x25, 0x05, 0x1D, 0x01, 0x00, 0x64, 0x00])))
+            print("[9] send user record read 25 05 1D (seq=4, users 1-100) ...")
+            ws.send(proto.wrap_ws(q))
+            deadline = time.time() + args.timeout
+            while time.time() < deadline:
+                kind, data = recv_frame(ws, args.timeout)
+                if kind != "panel":
+                    continue
+                p = proto.parse(data)
+                if p["seq"] == 4 and p["crc_ok"]:
+                    pl = p["payload"]
+                    users = decode_users(pl)
+                    print(f"    Users ({len(users)} found):")
+                    for u in users:
+                        print(f"      #{u['num']:3d}  {u['name']}")
                     break
     finally:
         ws.close()
