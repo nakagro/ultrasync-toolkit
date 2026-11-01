@@ -273,6 +273,10 @@ def main():
                     help="read area names")
     ap.add_argument("--doors", action="store_true",
                     help="read door names")
+    ap.add_argument("--devices", action="store_true",
+                    help="read device names (keypads, card readers)")
+    ap.add_argument("--dump-all", action="store_true",
+                    help="dump all configuration (zones, areas, doors, devices, users)")
     ap.add_argument("--timeout", type=float, default=12.0)
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="verbose output with connection steps and raw data (for debugging/LLM)")
@@ -524,7 +528,7 @@ def main():
                 print("Users: (none found)")
 
         # [10] optional zone names read
-        if args.zones:
+        if args.zones or args.dump_all:
             # 25 06 98 30 <start_lo> <start_hi> <count_lo> <count_hi>
             seq = 10
             all_names = []
@@ -563,7 +567,7 @@ def main():
                 print("Zones: (none found)")
 
         # [11] optional area/user-category names read (type 0x34)
-        if args.areas:
+        if args.areas or args.dump_all:
             seq = 20
             all_names = []
             current_start = 1
@@ -601,7 +605,7 @@ def main():
                 print("Areas: (none found)")
 
         # [12] optional door names read
-        if args.doors:
+        if args.doors or args.dump_all:
             q = proto.build(0x60, 30, tx_payload(session, bytes([
                 0x25, 0x06, 0x98, 0x13, 0x01, 0x00, 0xFF, 0xFF
             ])))
@@ -622,6 +626,30 @@ def main():
                             print(f"  #{d['num']:3d}  {d['name']}")
                     else:
                         print("Doors: (none found)")
+                    break
+
+        # [13] optional device names read
+        if args.devices or args.dump_all:
+            q = proto.build(0x60, 40, tx_payload(session, bytes([
+                0x25, 0x06, 0x98, 0x28, 0x01, 0x00, 0xFF, 0xFF
+            ])))
+            if VERBOSE:
+                print("[13] fetch device names ...")
+            ws.send(proto.wrap_ws(q))
+            deadline = time.time() + args.timeout
+            while time.time() < deadline:
+                kind, data = recv_frame(ws, args.timeout)
+                if kind != "panel":
+                    continue
+                p = proto.parse(data)
+                if p["seq"] == 40 and p["crc_ok"]:
+                    names = decode_names(p["payload"])
+                    if names:
+                        print("Devices:")
+                        for d in names:
+                            print(f"  #{d['num']:3d}  {d['name']}")
+                    else:
+                        print("Devices: (none found)")
                     break
     finally:
         ws.close()
