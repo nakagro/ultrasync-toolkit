@@ -32,13 +32,23 @@ from . import ultrasync_webauth as wa
 
 
 # ---------- record decoders ----------
+# Event codes observed in CTPlus capture. Many still unmapped.
+# Format: code byte at offset 6 in 14-byte event record
 EVENT_CODES = {
     0x0b: "ARM",
     0x0c: "DISARM",
+    0xd3: "AUTO-ARM",      # 0xd3 02 00 01 pattern - likely automatic arm
+    0x08: "ACCESS",        # 0x08 10 01 00 pattern - door access
     0x01: "ZONE ALARM",
     0x02: "ZONE RESTORE",
-    0x05: "DOOR ACCESS",
+    0x03: "ZONE TAMPER",
+    0x04: "ZONE TROUBLE",
+    0x05: "DOOR UNLOCK",
     0x06: "DOOR DENIED",
+    0x07: "DOOR LOCK",
+    0x10: "USER LOGIN",
+    0x11: "USER LOGOUT",
+    # TODO: More codes to map from CTPlus capture analysis
 }
 
 
