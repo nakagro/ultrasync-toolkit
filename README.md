@@ -58,27 +58,63 @@ Required credentials:
 
 ## Usage
 
-After installation:
+### Python API (recommended)
+
+```python
+from ultrasync_toolkit import Session
+
+# Connect and query
+with Session(sid="123456789012", passcode="1234", 
+             user_number=1, user_pin="1234") as panel:
+    
+    # Get panel info
+    info = panel.get_info()
+    print(f"Connected to: {info.name}")
+    
+    # Get users
+    for user in panel.get_users():
+        print(f"  #{user.num}: {user.name}")
+    
+    # Get zones
+    for zone in panel.get_zones():
+        print(f"  Zone {zone.num}: {zone.name}")
+    
+    # Get events
+    for event in panel.get_events(count=10):
+        print(f"  {event.time} {event.code} user={event.user}")
+    
+    # Get area config (exit/entry delays)
+    for area in panel.get_area_config():
+        print(f"  Area {area.num}: exit={area.exit_time}s entry={area.entry_time}s")
+```
+
+### CLI
 
 ```bash
-# Run as installed command
+# Basic info
 ultrasync --env .env --info
 
-# Or run directly
-python -m ultrasync_toolkit.connect_login --env .env --info
-```
+# List users, zones, areas, doors, devices
+ultrasync --env .env --users
+ultrasync --env .env --zones
+ultrasync --env .env --areas
+ultrasync --env .env --doors
+ultrasync --env .env --devices
 
-Expected output:
-```
-[1] WebAuth as id=XXXX...(12 chars) -> webauth-a.ultraconnect.com
-    relay_server=xtun-XXX.ultraconnect.com  webkey=**** (22 chars)
-[2] Open tunnel: wss://...
-[3] relay ready message: control '{}\n'
-[4] send login seq=0 ...
-[5] LOGIN REPLY: {'ok': True, 'session': ..., 'mask': ...}
-    >>> CONNECTED. Authenticated to the panel.
-[6] send read-only identity query ...
-    identity reply (45 bytes): ...
+# Dump all config
+ultrasync --env .env --dump-all
+
+# JSON output (for scripts)
+ultrasync --env .env --zones --json
+
+# Event history
+ultrasync --env .env --history 50
+
+# Area timers
+ultrasync --env .env --area-config
+
+# Verbose mode (for debugging)
+ultrasync --env .env --info -v
 ```
 
 ## Testing
