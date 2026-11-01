@@ -187,6 +187,7 @@ def parse_login_reply(payload: bytes) -> dict:
 
 # ---------- websocket helpers ----------
 DEBUG = False
+VERBOSE = False
 
 def recv_frame(ws, timeout=10.0):
     """Return ('control', text) for relay JSON or ('panel', bytes) for a ws:N{b64} frame."""
@@ -215,11 +216,13 @@ def main():
                     help="after login, send the read-only identity query (25 02 37 01)")
     ap.add_argument("--read-system", action="store_true",
                     help="read System Options record (0x36) — contains arm state bits")
-    ap.add_argument("--history", action="store_true",
-                    help="read event history buffer (25 05 45)")
-    ap.add_argument("--users", action="store_true",
-                    help="read user records (0x1D)")
+    ap.add_argument("--history", nargs="?", const="50", metavar="COUNT",
+                    help="read event history (default 50 events, or specify count)")
+    ap.add_argument("--users", nargs="?", const="1-100", metavar="RANGE",
+                    help="read user records (default 1-100, or specify N or N-M)")
     ap.add_argument("--timeout", type=float, default=12.0)
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="verbose output with connection steps and raw data (for debugging/LLM)")
     ap.add_argument("--debug", action="store_true", help="print raw frames (no credentials)")
     ap.add_argument("--replay-ctplus-login", action="store_true",
                     help="use the exact login CTPlus last sent (known-good proof; stop CTPlus first)")
@@ -227,8 +230,9 @@ def main():
                     help="legacy auth type: use ULTRASYNC_SECURITY_PASSWORD for the "
                          "security field instead of the passcode")
     args = ap.parse_args()
-    global DEBUG
+    global DEBUG, VERBOSE
     DEBUG = args.debug
+    VERBOSE = args.verbose or args.debug  # debug implies verbose
 
     env = load_env(Path(args.env))
     # In "Authentication" auth mode (TS-CHPLUS default) the panel-login security
@@ -248,41 +252,47 @@ def main():
     except ValueError:
         sys.exit("ULTRASYNC_USER_NUMBER must be an integer")
 
-    print(f"[1] WebAuth as id={sid[:4]}...({len(sid)} chars) -> {wa.DEFAULT_WEBAUTH_HOST}")
+    if VERBOSE:
+        print(f"[1] WebAuth as id={sid[:4]}...({len(sid)} chars) -> {wa.DEFAULT_WEBAUTH_HOST}")
     try:
         resp = wa.webauth(sid, passcode)
     except Exception as e:
-        sys.exit(f"    WebAuth failed: {e}")
+        sys.exit(f"WebAuth failed: {e}")
     if "error" in resp:
-        sys.exit(f"    WebAuth returned error: {resp['error']}")
+        sys.exit(f"WebAuth returned error: {resp['error']}")
     relay = resp.get("relay_server")
     webkey = resp.get("webkey")
     if not relay or not webkey:
-        sys.exit(f"    WebAuth response missing relay_server/webkey. Keys: {list(resp)}")
-    print(f"    relay_server={relay}  webkey={'*' * len(webkey)} ({len(webkey)} chars)")
+        sys.exit(f"WebAuth response missing relay_server/webkey. Keys: {list(resp)}")
+    if VERBOSE:
+        print(f"    relay_server={relay}  webkey={'*' * len(webkey)} ({len(webkey)} chars)")
 
     url = resp["_tunnel_url"]
-    print(f"[2] Open tunnel: wss://{relay}/xtun/panel?id=...&webkey=***&port=80&multi=true")
+    if VERBOSE:
+        print(f"[2] Open tunnel: wss://{relay}/xtun/panel?id=...&webkey=***&port=80&multi=true")
     ws = websocket.create_connection(url, timeout=args.timeout)
     try:
         # [3] relay ready message
         kind, data = recv_frame(ws, args.timeout)
-        print(f"[3] relay ready message: {kind} {data!r}")
+        if VERBOSE:
+            print(f"[3] relay ready message: {kind} {data!r}")
 
         # [4] send login. Authentication mode: security field = passcode.
         if args.replay_ctplus_login:
             inner = latest_ctplus_login_inner()
             if not inner:
-                print("    could not find a CTPlus login frame to replay; using .env")
+                if VERBOSE:
+                    print("    could not find a CTPlus login frame to replay; using .env")
                 inner = build_login_inner(passcode, user_number, env["ULTRASYNC_USER_PIN"])
-            else:
+            elif VERBOSE:
                 print("    (replaying CTPlus's own last login — known-good creds)")
         else:
             sec_field = (env.get("ULTRASYNC_SECURITY_PASSWORD", "")
                          if args.security_password_auth else passcode)
             inner = build_login_inner(sec_field, user_number, env["ULTRASYNC_USER_PIN"])
         login = proto.build(0x60, 0, tx_payload(b"\x00\x00\x00\x00", inner))
-        print(f"[4] send login seq=0 ({len(login)} wire bytes, inner={len(inner)} bytes) ...")
+        if VERBOSE:
+            print(f"[4] send login seq=0 ({len(login)} wire bytes, inner={len(inner)} bytes) ...")
         if DEBUG:
             # mask the credential bytes (inner offsets 3..17) in the printed hex
             masked = bytearray(login)
@@ -296,35 +306,37 @@ def main():
         while time.time() < deadline:
             kind, data = recv_frame(ws, args.timeout)
             if kind != "panel":
-                print(f"    (control: {data!r})")
+                if VERBOSE:
+                    print(f"    (control: {data!r})")
                 continue
             p = proto.parse(data)
             if not p["crc_ok"]:
-                print(f"    frame CRC FAILED: {data.hex(' ')}")
+                print(f"CRC FAILED: {data.hex(' ')}")
                 continue
             if p["type"] == 0x40 and p["payload"][:1] == b"\x01":
                 r = parse_login_reply(p["payload"])
-                print(f"[5] LOGIN REPLY: {r}")
+                if VERBOSE:
+                    print(f"[5] LOGIN REPLY: {r}")
                 if r.get("ok"):
                     session = bytes(r["session"])
-                    print(f"    >>> CONNECTED. Authenticated to the panel. "
-                          f"session={session.hex()} mask=0x{r['mask']:08x}")
+                    if VERBOSE:
+                        print(f"    >>> CONNECTED. session={session.hex()} mask=0x{r['mask']:08x}")
                 else:
-                    print(f"    >>> login rejected / insufficient permission "
-                          f"(bit13={r.get('bit13')} bit18={r.get('bit18')})")
+                    print(f"Login rejected (bit13={r.get('bit13')} bit18={r.get('bit18')})")
                 break
-            else:
+            elif VERBOSE:
                 print(f"    other panel frame type=0x{p['type']:02x} "
                       f"payload={p['payload'].hex(' ')}")
 
         if session is None:
-            print("    No valid login reply received.")
+            print("No valid login reply received.")
             return
 
         # [6] optional read-only identity query
         if args.info:
             q = proto.build(0x60, 1, tx_payload(session, bytes([0x25, 0x02, 0x37, 0x01])))
-            print("[6] send read-only identity query 25 02 37 01 (seq=1) ...")
+            if VERBOSE:
+                print("[6] send read-only identity query 25 02 37 01 (seq=1) ...")
             ws.send(proto.wrap_ws(q))
             deadline = time.time() + args.timeout
             while time.time() < deadline:
@@ -335,15 +347,17 @@ def main():
                 if p["seq"] == 1 and p["crc_ok"]:
                     pl = p["payload"]
                     # panel name is the printable CH-... run in the payload
-                    name = bytes(b for b in pl if 32 <= b < 127)
-                    print(f"    identity reply ({len(pl)} bytes): {pl.hex(' ')}")
-                    print(f"    printable: {name.decode('ascii', 'replace')}")
+                    name = bytes(b for b in pl if 32 <= b < 127).decode('ascii', 'replace')
+                    if VERBOSE:
+                        print(f"    identity reply ({len(pl)} bytes): {pl.hex(' ')}")
+                    print(f"Panel: {name}")
                     break
 
         # [7] optional System Options record read (0x36)
         if args.read_system:
             q = proto.build(0x60, 2, tx_payload(session, bytes([0x25, 0x01, 0x36, 0x01])))
-            print("[7] send System Options read 25 01 36 01 (seq=2) ...")
+            if VERBOSE:
+                print("[7] send System Options read 25 01 36 01 (seq=2) ...")
             ws.send(proto.wrap_ws(q))
             deadline = time.time() + args.timeout
             while time.time() < deadline:
@@ -353,15 +367,21 @@ def main():
                 p = proto.parse(data)
                 if p["seq"] == 2 and p["crc_ok"]:
                     pl = p["payload"]
-                    print(f"    System Options ({len(pl)} bytes): {pl.hex(' ')}")
+                    # TODO: decode system options once arm state bits are known
+                    print(f"System Options ({len(pl)} bytes): {pl.hex(' ')}")
                     break
 
         # [8] optional event history read
         if args.history:
             # 25 05 45 <start_lo> <start_hi> <count_lo> <count_hi>
-            # Start at record 1, read 50 events
-            q = proto.build(0x60, 3, tx_payload(session, bytes([0x25, 0x05, 0x45, 0x01, 0x00, 0x32, 0x00])))
-            print("[8] send event history read 25 05 45 (seq=3, up to 50 events) ...")
+            event_count = int(args.history)
+            q = proto.build(0x60, 3, tx_payload(session, bytes([
+                0x25, 0x05, 0x45,
+                0x01, 0x00,  # start at record 1
+                event_count & 0xFF, (event_count >> 8) & 0xFF
+            ])))
+            if VERBOSE:
+                print(f"[8] send event history read 25 05 45 (seq=3, up to {event_count} events) ...")
             ws.send(proto.wrap_ws(q))
             deadline = time.time() + args.timeout
             while time.time() < deadline:
@@ -372,17 +392,33 @@ def main():
                 if p["seq"] == 3 and p["crc_ok"]:
                     pl = p["payload"]
                     events = decode_events(pl)
-                    print(f"    Event history ({len(events)} events):")
+                    if VERBOSE:
+                        print(f"    Event history ({len(events)} events, {len(pl)} bytes):")
+                    print("Events:")
                     for ev in events:
-                        user_str = f"user {ev['user']}" if ev['user'] else ""
-                        print(f"      {ev['time']}  {ev['code']:12} {user_str}")
+                        user_str = f"  user {ev['user']}" if ev['user'] else ""
+                        print(f"  {ev['time']}  {ev['code']:12}{user_str}")
                     break
 
         # [9] optional user record read
         if args.users:
-            # 25 05 1D <start_lo> <start_hi> <count_lo> <count_hi> - range read users 1-100
-            q = proto.build(0x60, 4, tx_payload(session, bytes([0x25, 0x05, 0x1D, 0x01, 0x00, 0x64, 0x00])))
-            print("[9] send user record read 25 05 1D (seq=4, users 1-100) ...")
+            # Parse range: "50" -> user 50, "1-10" -> users 1-10
+            user_range = args.users
+            if "-" in user_range:
+                start, end = user_range.split("-", 1)
+                start, end = int(start), int(end)
+                count = end - start + 1
+            else:
+                start = int(user_range)
+                count = 1
+            # 25 05 1D <start_lo> <start_hi> <count_lo> <count_hi>
+            q = proto.build(0x60, 4, tx_payload(session, bytes([
+                0x25, 0x05, 0x1D,
+                start & 0xFF, (start >> 8) & 0xFF,
+                count & 0xFF, (count >> 8) & 0xFF
+            ])))
+            if VERBOSE:
+                print(f"[9] send user record read 25 05 1D (seq=4, users {start}-{start+count-1}) ...")
             ws.send(proto.wrap_ws(q))
             deadline = time.time() + args.timeout
             while time.time() < deadline:
@@ -393,13 +429,16 @@ def main():
                 if p["seq"] == 4 and p["crc_ok"]:
                     pl = p["payload"]
                     users = decode_users(pl)
-                    print(f"    Users ({len(users)} found):")
+                    if VERBOSE:
+                        print(f"    Users ({len(users)} found, {len(pl)} bytes):")
+                    print("Users:")
                     for u in users:
-                        print(f"      #{u['num']:3d}  {u['name']}")
+                        print(f"  #{u['num']:3d}  {u['name']}")
                     break
     finally:
         ws.close()
-        print("[*] tunnel closed.")
+        if VERBOSE:
+            print("[*] tunnel closed.")
 
 
 if __name__ == "__main__":
