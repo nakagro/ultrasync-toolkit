@@ -281,6 +281,8 @@ def main():
                     help="read zone/input names")
     ap.add_argument("--areas", action="store_true",
                     help="read area names")
+    ap.add_argument("--area-state", action="store_true",
+                    help="read raw area state bytes (0x32) to find arm bits")
     ap.add_argument("--doors", action="store_true",
                     help="read door names")
     ap.add_argument("--devices", action="store_true",
@@ -291,6 +293,8 @@ def main():
                     help="output in JSON format")
     ap.add_argument("--area-config", action="store_true",
                     help="read raw area configuration (includes exit/entry delays)")
+    ap.add_argument("--raw-query", metavar="HEX",
+                    help="send raw query bytes (hex, e.g. '25 01 44')")
     ap.add_argument("--timeout", type=float, default=12.0)
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="verbose output with connection steps and raw data (for debugging/LLM)")
@@ -628,6 +632,43 @@ def main():
                         print(f"  #{a['num']:3d}  {a['name']}")
                 else:
                     print("Areas: (none found)")
+
+        # [11b] optional area state read (record type 0x32)
+        if args.area_state:
+            # Query area state records - exact format from CTPlus capture
+            q = proto.build(0x60, 25, tx_payload(session, bytes([
+                0x25, 0x03, 0x32, 0x01, 0x50
+            ])))
+            if VERBOSE:
+                print("[11b] fetch area state (0x32) ...")
+            ws.send(proto.wrap_ws(q))
+            deadline = time.time() + args.timeout
+            while time.time() < deadline:
+                kind, data = recv_frame(ws, args.timeout)
+                if kind != "panel":
+                    continue
+                p = proto.parse(data)
+                if p["crc_ok"]:
+                    pl = p["payload"]
+                    print(f"Area State ({len(pl)} bytes): {pl.hex(' ')}")
+                    break
+
+        # [11c] optional raw query
+        if args.raw_query:
+            query_bytes = bytes.fromhex(args.raw_query.replace(" ", ""))
+            q = proto.build(0x60, 26, tx_payload(session, query_bytes))
+            print(f"[raw] sending: {query_bytes.hex(' ')}")
+            ws.send(proto.wrap_ws(q))
+            deadline = time.time() + args.timeout
+            while time.time() < deadline:
+                kind, data = recv_frame(ws, args.timeout)
+                if kind != "panel":
+                    continue
+                p = proto.parse(data)
+                if p["crc_ok"]:
+                    pl = p["payload"]
+                    print(f"[raw] response ({len(pl)} bytes): {pl.hex(' ')}")
+                    break
 
         # [12] optional door names read
         if args.doors or args.dump_all:

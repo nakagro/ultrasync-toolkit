@@ -17,6 +17,11 @@ Key tables relevant to the protocol:
 | `tc_macrologic` | Macro logic rules |
 | `tc_systemoption` | System-wide options |
 | `tc_chtimes` | Panel timing settings |
+| `tc_autoarmdisarm` | Auto arm/disarm schedules |
+| `tc_areagrpmap` | Area group mapping (arm/disarm per area) |
+| `tc_ultrasyncreport` | UltraSync event reporting config |
+| `tc_ras` | Remote Arming Station (keypad) config |
+| `tc_nacalarmlevelmap` | NAC alarm level mapping |
 
 ## Area Record Fields (tc_area)
 
@@ -131,6 +136,55 @@ modetime, dualcustodytime, cardpintime
 - `tc_automation` - Automation zone records
 - `tc_macrologic` - Macro logic records (up to 48 per panel)
 - `tc_dgpmacrologic` - DGP macro logic
+
+## Arm/Disarm Related Fields
+
+### tc_alarmgroup (Alarm Group)
+
+```
+agarm           - Area group arm permission
+agdisarm        - Area group disarm permission
+autoarm         - Auto arm enabled
+forcearming     - Allow force arm with unsealed zones
+preventforcedisarm - Prevent force disarm
+preventarm      - Prevent arm
+```
+
+### tc_autoarmdisarm (Auto Arm/Disarm Schedules)
+
+```
+aaaunit, chunit, aaano, aaadesc, facilityid, timezone, alarmgroup
+```
+
+### tc_ras (Remote Arming Station/Keypad)
+
+```
+armdisarmoneKey   - Arm/disarm with one key press
+cardautodisarm    - Card auto disarm
+cardalwaysdisarm  - Card always disarms
+```
+
+### tc_areagrpmap (Area Group Mapping)
+
+```
+areagrpunit, areano, arm, disarm, resetflag, areatotime
+```
+
+### tc_ultrasyncreport (UltraSync Reporting)
+
+```
+reportarmdisarmevents - Report arm/disarm events
+reportalarmevents     - Report alarm events
+reportpowerevents     - Report power events
+reportsystemevents    - Report system events
+reporttraceevents     - Report trace events
+```
+
+### Key Functions (from DLL exports)
+
+- `disarmArea` - Disarm an area
+- `downloadAutoArmDisarm` - Download auto arm/disarm schedules
+- `uploadAutoArmDisarm` - Upload auto arm/disarm schedules
 
 ## Notes
 
