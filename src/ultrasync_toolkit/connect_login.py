@@ -79,24 +79,47 @@ def decode_events(payload: bytes) -> list:
 
 
 def decode_users(payload: bytes) -> list:
-    """Parse user record response into list of user dicts."""
+    """Parse user record response into list of user dicts.
+
+    Format: 6-byte header (7d 58 1d 2b start_lo start_hi), then 42-byte records.
+    User number = start_index + record_position (NOT from record bytes).
+    Name field is ~25 bytes, usually starting at offset 17 in the record,
+    possibly preceded by 0x1a marker at offset 16.
+    """
     if len(payload) < 6:
         return []
-    # Header: 6 bytes, then 42-byte records
-    # 90 bytes = 6 header + 84 data = 2 users * 42 bytes
+    # Header: 7d 58 1d 2b <start_lo> <start_hi>
+    start_index = struct.unpack("<H", payload[4:6])[0]
     data = payload[6:]
     users = []
     rec_size = 42
+    rec_num = 0
+
     for i in range(0, len(data), rec_size):
         if i + rec_size > len(data):
             break
         rec = data[i:i+rec_size]
-        user_num = struct.unpack("<H", rec[0:2])[0]
-        # Name field is 26 bytes starting at offset 16, null-terminated
-        name_bytes = rec[16:42]
-        name = name_bytes.split(b'\x00')[0].decode('ascii', 'replace').strip()
+        user_num = start_index + rec_num
+        rec_num += 1
+
+        # Find name: look for printable ASCII starting around offset 15-20
+        name = ""
+        for name_start in range(15, 22):
+            if name_start >= len(rec):
+                break
+            # Skip 0x1a marker if present
+            if rec[name_start] == 0x1a and name_start + 1 < len(rec):
+                name_start += 1
+            # Check if this looks like a name (starts with printable char)
+            if 0x20 <= rec[name_start] <= 0x7e:
+                name_bytes = rec[name_start:name_start+25]
+                name = name_bytes.split(b'\x00')[0].decode('ascii', 'replace').strip()
+                if len(name) >= 2:  # valid name has at least 2 chars
+                    break
+
         if name:
             users.append({"num": user_num, "name": name})
+
     return users
 
 try:
@@ -391,50 +414,84 @@ def main():
                 p = proto.parse(data)
                 if p["seq"] == 3 and p["crc_ok"]:
                     pl = p["payload"]
+                    if VERBOSE:
+                        print(f"    raw ({len(pl)} bytes): {pl.hex(' ')}")
                     events = decode_events(pl)
                     if VERBOSE:
-                        print(f"    Event history ({len(events)} events, {len(pl)} bytes):")
-                    print("Events:")
-                    for ev in events:
-                        user_str = f"  user {ev['user']}" if ev['user'] else ""
-                        print(f"  {ev['time']}  {ev['code']:12}{user_str}")
+                        print(f"    Event history ({len(events)} events):")
+                    if events:
+                        print("Events:")
+                        for ev in events:
+                            user_str = f"  user {ev['user']}" if ev['user'] else ""
+                            print(f"  {ev['time']}  {ev['code']:12}{user_str}")
+                    else:
+                        print("Events: (none found)")
                     break
 
-        # [9] optional user record read
+        # [9] optional user record read (paginated - panel returns 2 users per response)
         if args.users:
             # Parse range: "50" -> user 50, "1-10" -> users 1-10
             user_range = args.users
             if "-" in user_range:
                 start, end = user_range.split("-", 1)
                 start, end = int(start), int(end)
-                count = end - start + 1
             else:
                 start = int(user_range)
-                count = 1
-            # 25 05 1D <start_lo> <start_hi> <count_lo> <count_hi>
-            q = proto.build(0x60, 4, tx_payload(session, bytes([
-                0x25, 0x05, 0x1D,
-                start & 0xFF, (start >> 8) & 0xFF,
-                count & 0xFF, (count >> 8) & 0xFF
-            ])))
-            if VERBOSE:
-                print(f"[9] send user record read 25 05 1D (seq=4, users {start}-{start+count-1}) ...")
-            ws.send(proto.wrap_ws(q))
-            deadline = time.time() + args.timeout
-            while time.time() < deadline:
-                kind, data = recv_frame(ws, args.timeout)
-                if kind != "panel":
-                    continue
-                p = proto.parse(data)
-                if p["seq"] == 4 and p["crc_ok"]:
-                    pl = p["payload"]
-                    users = decode_users(pl)
-                    if VERBOSE:
-                        print(f"    Users ({len(users)} found, {len(pl)} bytes):")
-                    print("Users:")
-                    for u in users:
-                        print(f"  #{u['num']:3d}  {u['name']}")
+                end = start + 99  # default to 100 users if single number given
+
+            all_users = []
+            seq = 4
+            current_start = start
+
+            while current_start <= end:
+                # 25 05 1D <start_lo> <start_hi> <count_lo> <count_hi>
+                # Request 0xFFFF to get max available, panel will return 2 at a time
+                q = proto.build(0x60, seq, tx_payload(session, bytes([
+                    0x25, 0x05, 0x1D,
+                    current_start & 0xFF, (current_start >> 8) & 0xFF,
+                    0xFF, 0xFF  # request max, panel returns 2
+                ])))
+                if VERBOSE:
+                    print(f"[9] fetch users starting at {current_start} (seq={seq}) ...")
+                ws.send(proto.wrap_ws(q))
+
+                # Wait for response
+                got_response = False
+                deadline = time.time() + args.timeout
+                while time.time() < deadline:
+                    kind, data = recv_frame(ws, args.timeout)
+                    if kind != "panel":
+                        continue
+                    p = proto.parse(data)
+                    if p["seq"] == seq and p["crc_ok"]:
+                        pl = p["payload"]
+                        if VERBOSE:
+                            print(f"    raw ({len(pl)} bytes): {pl.hex(' ')}")
+                        users = decode_users(pl)
+                        if users:
+                            all_users.extend(users)
+                            current_start = users[-1]["num"] + 1
+                        else:
+                            current_start = end + 1  # no more users, stop
+                        got_response = True
+                        break
+
+                if not got_response:
                     break
+                seq += 1
+                if seq > 250:  # safety limit
+                    break
+
+            # Filter to requested range and print
+            all_users = [u for u in all_users if start <= u["num"] <= end]
+            if VERBOSE:
+                print(f"    Users ({len(all_users)} found):")
+            if all_users:
+                print("Users:")
+                for u in all_users:
+                    print(f"  #{u['num']:3d}  {u['name']}")
+            else:
+                print("Users: (none found)")
     finally:
         ws.close()
         if VERBOSE:
