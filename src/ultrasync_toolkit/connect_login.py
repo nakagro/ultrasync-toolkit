@@ -78,6 +78,30 @@ def decode_events(payload: bytes) -> list:
     return events
 
 
+def decode_names(payload: bytes) -> list:
+    """Parse name record response (25 06 98 XX).
+
+    Format: 3-byte header (98 80 type), then variable records:
+    <index_lo> <index_hi> <length> <name bytes>
+    """
+    if len(payload) < 5:
+        return []
+    # Header: 98 80 <type> or similar
+    data = payload[3:] if payload[0] == 0x98 else payload[5:]
+    names = []
+    pos = 0
+    while pos + 3 < len(data):
+        idx = struct.unpack("<H", data[pos:pos+2])[0]
+        length = data[pos+2]
+        if length == 0 or pos + 3 + length > len(data):
+            break
+        name = data[pos+3:pos+3+length].decode('ascii', 'replace').strip()
+        if name:
+            names.append({"num": idx, "name": name})
+        pos += 3 + length
+    return names
+
+
 def decode_users(payload: bytes) -> list:
     """Parse user record response into list of user dicts.
 
@@ -243,6 +267,12 @@ def main():
                     help="read event history (default 50 events, or specify count)")
     ap.add_argument("--users", nargs="?", const="1-100", metavar="RANGE",
                     help="read user records (default 1-100, or specify N or N-M)")
+    ap.add_argument("--zones", action="store_true",
+                    help="read zone/input names")
+    ap.add_argument("--areas", action="store_true",
+                    help="read area names")
+    ap.add_argument("--doors", action="store_true",
+                    help="read door names")
     ap.add_argument("--timeout", type=float, default=12.0)
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="verbose output with connection steps and raw data (for debugging/LLM)")
@@ -492,6 +522,107 @@ def main():
                     print(f"  #{u['num']:3d}  {u['name']}")
             else:
                 print("Users: (none found)")
+
+        # [10] optional zone names read
+        if args.zones:
+            # 25 06 98 30 <start_lo> <start_hi> <count_lo> <count_hi>
+            seq = 10
+            all_names = []
+            current_start = 1
+            while current_start < 500:
+                q = proto.build(0x60, seq, tx_payload(session, bytes([
+                    0x25, 0x06, 0x98, 0x30,
+                    current_start & 0xFF, (current_start >> 8) & 0xFF,
+                    0xFF, 0xFF
+                ])))
+                if VERBOSE:
+                    print(f"[10] fetch zone names starting at {current_start} (seq={seq}) ...")
+                ws.send(proto.wrap_ws(q))
+                deadline = time.time() + args.timeout
+                got_any = False
+                while time.time() < deadline:
+                    kind, data = recv_frame(ws, args.timeout)
+                    if kind != "panel":
+                        continue
+                    p = proto.parse(data)
+                    if p["seq"] == seq and p["crc_ok"]:
+                        names = decode_names(p["payload"])
+                        if names:
+                            all_names.extend(names)
+                            current_start = names[-1]["num"] + 1
+                            got_any = True
+                        break
+                if not got_any:
+                    break
+                seq += 1
+            if all_names:
+                print("Zones:")
+                for z in all_names:
+                    print(f"  #{z['num']:3d}  {z['name']}")
+            else:
+                print("Zones: (none found)")
+
+        # [11] optional area/user-category names read (type 0x34)
+        if args.areas:
+            seq = 20
+            all_names = []
+            current_start = 1
+            while current_start < 100:
+                q = proto.build(0x60, seq, tx_payload(session, bytes([
+                    0x25, 0x06, 0x98, 0x34,
+                    current_start & 0xFF, (current_start >> 8) & 0xFF,
+                    0xFF, 0xFF
+                ])))
+                if VERBOSE:
+                    print(f"[11] fetch area names starting at {current_start} (seq={seq}) ...")
+                ws.send(proto.wrap_ws(q))
+                deadline = time.time() + args.timeout
+                got_any = False
+                while time.time() < deadline:
+                    kind, data = recv_frame(ws, args.timeout)
+                    if kind != "panel":
+                        continue
+                    p = proto.parse(data)
+                    if p["seq"] == seq and p["crc_ok"]:
+                        names = decode_names(p["payload"])
+                        if names:
+                            all_names.extend(names)
+                            current_start = names[-1]["num"] + 1
+                            got_any = True
+                        break
+                if not got_any:
+                    break
+                seq += 1
+            if all_names:
+                print("Areas/Categories:")
+                for a in all_names:
+                    print(f"  #{a['num']:3d}  {a['name']}")
+            else:
+                print("Areas: (none found)")
+
+        # [12] optional door names read
+        if args.doors:
+            q = proto.build(0x60, 30, tx_payload(session, bytes([
+                0x25, 0x06, 0x98, 0x13, 0x01, 0x00, 0xFF, 0xFF
+            ])))
+            if VERBOSE:
+                print("[12] fetch door names ...")
+            ws.send(proto.wrap_ws(q))
+            deadline = time.time() + args.timeout
+            while time.time() < deadline:
+                kind, data = recv_frame(ws, args.timeout)
+                if kind != "panel":
+                    continue
+                p = proto.parse(data)
+                if p["seq"] == 30 and p["crc_ok"]:
+                    names = decode_names(p["payload"])
+                    if names:
+                        print("Doors:")
+                        for d in names:
+                            print(f"  #{d['num']:3d}  {d['name']}")
+                    else:
+                        print("Doors: (none found)")
+                    break
     finally:
         ws.close()
         if VERBOSE:
