@@ -413,16 +413,17 @@ class Session:
 
         Queries record 0x46 and checks byte 5:
         State values in low 3 bits:
-        - 0x04 (100) = armed
+        - 0x04 (100) = armed, all zones sealed
+        - 0x05 (101) = armed, unsealed inputs present
         - 0x02 (010) = disarmed
-        - 0x05 (101) = disarmed + unsealed inputs
         """
         cmd = bytes([0x25, 0x01, 0x46])
         resp = self._query(cmd)
         if len(resp) >= 6:
             status_byte = resp[5]
-            # Armed only when low 3 bits == 4
-            return (status_byte & 0x07) == 0x04
+            state = status_byte & 0x07
+            # Armed when state is 0x04 or 0x05
+            return state in (0x04, 0x05)
         return False
 
     def get_arm_status(self) -> dict:

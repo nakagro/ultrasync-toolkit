@@ -691,10 +691,11 @@ def main():
                         status_byte = pl[5]
                         state = status_byte & 0x07
                         armed = state == 0x04
-                    if state == 0x04:
+                    if state in (0x04, 0x05):
                         status_str = "ARMED"
-                    elif state == 0x05:
-                        status_str = "ARMING (exit delay)"
+                        if state == 0x05:
+                            status_str += " (unsealed inputs)"
+                        armed = True
                     elif state == 0x02:
                         status_str = "DISARMED"
                     else:
