@@ -412,15 +412,15 @@ class Session:
         """Check if the panel is armed.
 
         Queries record 0x46 and checks byte 5:
-        - Bit 1 set (0x02) = armed
-        - Bit 2 set (0x04) = disarmed
+        - Bit 2 set (0x04) = armed (Secured)
+        - Bit 1 set (0x02) = disarmed
         """
         cmd = bytes([0x25, 0x01, 0x46])
         resp = self._query(cmd)
         if len(resp) >= 6:
             status_byte = resp[5]
-            # Bit 1 = armed, Bit 2 = disarmed
-            return (status_byte & 0x02) != 0
+            # Bit 2 = armed, Bit 1 = disarmed
+            return (status_byte & 0x04) != 0
         return False
 
     def get_arm_status(self) -> dict:
