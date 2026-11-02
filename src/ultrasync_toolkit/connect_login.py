@@ -689,7 +689,7 @@ def main():
                     armed = False
                     if len(pl) >= 6:
                         status_byte = pl[5]
-                        armed = (status_byte & 0x04) != 0
+                        armed = (status_byte & 0x07) == 0x04
                     status_str = "ARMED" if armed else "DISARMED"
                     if args.json:
                         results["status"] = {"armed": armed, "raw": pl.hex(" ")}
