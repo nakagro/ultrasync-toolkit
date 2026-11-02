@@ -408,6 +408,34 @@ class Session:
                                   exit_time=exit_time, entry_time=entry_time))
         return areas
 
+    def is_armed(self) -> bool:
+        """Check if the panel is armed.
+
+        Queries record 0x46 and checks byte 5:
+        - Bit 1 set (0x02) = armed
+        - Bit 2 set (0x04) = disarmed
+        """
+        cmd = bytes([0x25, 0x01, 0x46])
+        resp = self._query(cmd)
+        if len(resp) >= 6:
+            status_byte = resp[5]
+            # Bit 1 = armed, Bit 2 = disarmed
+            return (status_byte & 0x02) != 0
+        return False
+
+    def get_arm_status(self) -> dict:
+        """Get detailed arm status including raw bytes."""
+        cmd = bytes([0x25, 0x01, 0x46])
+        resp = self._query(cmd)
+        armed = False
+        if len(resp) >= 6:
+            status_byte = resp[5]
+            armed = (status_byte & 0x02) != 0
+        return {
+            "armed": armed,
+            "raw": resp.hex(" ") if resp else ""
+        }
+
     # ---------- Internal Methods ----------
 
     def _query(self, inner_cmd: bytes) -> bytes:

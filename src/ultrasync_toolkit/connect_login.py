@@ -283,6 +283,8 @@ def main():
                     help="read area names")
     ap.add_argument("--area-state", action="store_true",
                     help="read raw area state bytes (0x32) to find arm bits")
+    ap.add_argument("--status", action="store_true",
+                    help="show arm/disarm status")
     ap.add_argument("--doors", action="store_true",
                     help="read door names")
     ap.add_argument("--devices", action="store_true",
@@ -668,6 +670,33 @@ def main():
                 if p["crc_ok"]:
                     pl = p["payload"]
                     print(f"[raw] response ({len(pl)} bytes): {pl.hex(' ')}")
+                    break
+
+        # [11d] optional arm status
+        if args.status:
+            q = proto.build(0x60, 27, tx_payload(session, bytes([0x25, 0x01, 0x46])))
+            if VERBOSE:
+                print("[11d] query arm status (0x46) ...")
+            ws.send(proto.wrap_ws(q))
+            deadline = time.time() + args.timeout
+            while time.time() < deadline:
+                kind, data = recv_frame(ws, args.timeout)
+                if kind != "panel":
+                    continue
+                p = proto.parse(data)
+                if p["crc_ok"]:
+                    pl = p["payload"]
+                    armed = False
+                    if len(pl) >= 6:
+                        status_byte = pl[5]
+                        armed = (status_byte & 0x02) != 0
+                    status_str = "ARMED" if armed else "DISARMED"
+                    if args.json:
+                        results["status"] = {"armed": armed, "raw": pl.hex(" ")}
+                    else:
+                        print(f"Panel Status: {status_str}")
+                        if VERBOSE:
+                            print(f"  raw: {pl.hex(' ')}")
                     break
 
         # [12] optional door names read
