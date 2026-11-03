@@ -416,6 +416,7 @@ class Session:
         - 0x04 (100) = armed, all zones sealed
         - 0x05 (101) = armed, unsealed inputs present
         - 0x02 (010) = disarmed
+        - 0x00 (000) = disarmed (accessed)
         """
         cmd = bytes([0x25, 0x01, 0x46])
         resp = self._query(cmd)

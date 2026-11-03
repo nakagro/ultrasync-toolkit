@@ -696,8 +696,10 @@ def main():
                         if state == 0x05:
                             status_str += " (unsealed inputs)"
                         armed = True
-                    elif state == 0x02:
+                    elif state in (0x00, 0x02):
                         status_str = "DISARMED"
+                        if state == 0x00:
+                            status_str += " (accessed)"
                     else:
                         status_str = f"UNKNOWN (0x{state:02x})"
                     if args.json:
